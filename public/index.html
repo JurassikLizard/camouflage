@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chameleon</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="page">
+  <div class="site-header">
+    <h1>🦎 Chameleon</h1>
+    <p class="tagline">A social deduction party game. Find the impostor — or be one.</p>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="showTab('create')">Create</button>
+    <button class="tab-btn" onclick="showTab('join')">Join by Code</button>
+    <button class="tab-btn" onclick="showTab('browse')">Browse</button>
+  </div>
+
+  <!-- Create -->
+  <div id="tab-create" class="card">
+    <h3>Create a Lobby</h3>
+    <div class="form-group">
+      <label>Your Name</label>
+      <input id="create-name" type="text" maxlength="20" placeholder="e.g. Alex">
+    </div>
+    <div class="form-group form-check">
+      <input type="checkbox" id="create-public" checked>
+      <label for="create-public" style="margin:0">Public lobby</label>
+    </div>
+    <button class="btn-primary" onclick="createLobby()">Create &amp; Enter Lobby</button>
+  </div>
+
+  <!-- Join -->
+  <div id="tab-join" class="card" style="display:none">
+    <h3>Join by Code</h3>
+    <div class="form-group">
+      <label>Lobby Code</label>
+      <input id="join-code" class="uppercase" type="text" maxlength="6" placeholder="XKQR72">
+    </div>
+    <div class="form-group">
+      <label>Your Name</label>
+      <input id="join-name" type="text" maxlength="20" placeholder="e.g. Alex">
+    </div>
+    <button class="btn-primary" onclick="joinLobby()">Join Lobby</button>
+  </div>
+
+  <!-- Browse -->
+  <div id="tab-browse" style="display:none">
+    <div class="card flex-between mb-8" style="margin-bottom:8px">
+      <h3 style="margin:0">Public Lobbies</h3>
+      <button class="btn-secondary btn-sm" onclick="refreshBrowse()">↻ Refresh</button>
+    </div>
+    <div id="browse-list">
+      <p class="muted">Loading…</p>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket = io();
+  const STORE_TOKEN = 'chameleon_token';
+  const STORE_LOBBY = 'chameleon_lobby';
+  const STORE_PID   = 'chameleon_pid';
+
+  let myToken = localStorage.getItem(STORE_TOKEN);
+  if (!myToken) { myToken = crypto.randomUUID(); localStorage.setItem(STORE_TOKEN, myToken); }
+
+  const storedLobby = localStorage.getItem(STORE_LOBBY);
+  const storedPid   = localStorage.getItem(STORE_PID);
+  if (storedLobby && storedPid) {
+    socket.emit('lobby:reconnect', { token: myToken });
+  }
+
+  socket.on('lobby:joined', ({ lobbyCode, playerId }) => {
+    localStorage.setItem(STORE_LOBBY, lobbyCode);
+    localStorage.setItem(STORE_PID, playerId);
+    window.location.href = `/lobby.html?code=${lobbyCode}`;
+  });
+
+  socket.on('error:msg', msg => toast(msg, true));
+  socket.on('lobbies:list', renderBrowse);
+
+  function showTab(t) {
+    ['create','join','browse'].forEach(id => {
+      document.getElementById(`tab-${id}`).style.display = id === t ? '' : 'none';
+    });
+    document.querySelectorAll('.tab-btn').forEach((b,i) =>
+      b.classList.toggle('active', ['create','join','browse'][i] === t)
+    );
+    if (t === 'browse') refreshBrowse();
+  }
+
+  function createLobby() {
+    const username = document.getElementById('create-name').value.trim();
+    const isPublic = document.getElementById('create-public').checked;
+    if (!username) return toast('Enter a name first');
+    socket.emit('lobby:create', { username, isPublic, token: myToken });
+  }
+
+  function joinLobby() {
+    const lobbyCode = document.getElementById('join-code').value.trim().toUpperCase();
+    const username  = document.getElementById('join-name').value.trim();
+    if (!lobbyCode || !username) return toast('Fill in both fields');
+    socket.emit('lobby:join', { lobbyCode, username, token: myToken });
+  }
+
+  function joinPublic(code) {
+    const name = prompt('Your username:');
+    if (!name?.trim()) return;
+    socket.emit('lobby:join', { lobbyCode: code, username: name.trim(), token: myToken });
+  }
+
+  function refreshBrowse() {
+    socket.emit('lobbies:get');
+  }
+
+  function renderBrowse(list) {
+    const el = document.getElementById('browse-list');
+    if (!list.length) { el.innerHTML = '<p class="muted">No public lobbies open right now.</p>'; return; }
+    el.innerHTML = `
+      <div class="card" style="padding:0;overflow:hidden">
+        <table class="lobby-table">
+          <thead><tr><th>Code</th><th>Players</th><th></th></tr></thead>
+          <tbody>
+            ${list.map(l => `
+              <tr>
+                <td><strong>${l.code}</strong></td>
+                <td>${l.playerCount} — ${l.players.join(', ')}</td>
+                <td><button class="btn-primary btn-sm" onclick="joinPublic('${l.code}')">Join</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  let _toastTimer;
+  function toast(msg, isErr=false) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.borderColor = isErr ? 'var(--danger)' : 'var(--border)';
+    t.classList.add('show');
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+  }
+</script>
+</body>
+</html>

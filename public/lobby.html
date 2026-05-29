@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chameleon – Lobby</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="page">
+  <div class="flex-between mb-16">
+    <div class="flex gap-8">
+      <h2>🦎 <span id="lobby-code" style="font-family:monospace;letter-spacing:0.1em"></span></h2>
+      <button class="btn-secondary btn-sm" onclick="copyCode()">Copy code</button>
+    </div>
+    <button class="btn-secondary btn-sm" onclick="leaveGame()">Leave</button>
+  </div>
+
+  <!-- Players -->
+  <div class="card mb-16">
+    <div class="flex-between mb-8">
+      <h3 style="margin:0">Players</h3>
+      <span class="phase-badge" id="phase-badge">Waiting</span>
+    </div>
+    <div class="player-list" id="player-list"></div>
+  </div>
+
+  <!-- Settings (host only) -->
+  <div class="card mb-16" id="settings-card" style="display:none">
+    <h3>Settings</h3>
+    <div class="settings-grid">
+      <div class="form-group">
+        <label>Spy Mode</label>
+        <select id="s-spyMode">
+          <option value="sealed">Sealed — see hints after each submit</option>
+          <option value="live">Live — see hints as typed</option>
+          <option value="none">None — chameleon is blind</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Players Chameleon Can Spy On</label>
+        <input id="s-spyCount" type="number" min="0" max="20" value="3">
+      </div>
+    </div>
+    <div class="flex gap-8">
+      <button class="btn-primary btn-sm" onclick="saveSettings()">Save</button>
+      <button class="btn-danger btn-sm" onclick="resetScores()">Reset scores</button>
+    </div>
+  </div>
+
+  <!-- Host start button -->
+  <div id="host-controls" style="display:none">
+    <button class="btn-success wide-btn" id="start-btn" onclick="startRound()">Start Round</button>
+    <p class="muted text-center" style="margin-top:6px;font-size:0.8rem">Need at least 3 players</p>
+  </div>
+
+  <!-- Scoreboard -->
+  <div class="card mb-16" id="scoreboard" style="display:none">
+    <h3>Scores</h3>
+    <div id="score-list"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket    = io();
+  const params    = new URLSearchParams(location.search);
+  const lobbyCode = params.get('code')?.toUpperCase();
+  let myPid       = localStorage.getItem('chameleon_pid');
+  const myToken   = localStorage.getItem('chameleon_token');
+
+  if (!lobbyCode || !myPid) location.href = '/';
+
+  document.getElementById('lobby-code').textContent = lobbyCode;
+
+  let publicState = null;
+
+  socket.on('connect', () => {
+    socket.emit('lobby:reconnect', { token: myToken });
+  });
+
+  socket.on('lobby:joined', ({ playerId }) => {
+    if (playerId && playerId !== myPid) {
+      myPid = playerId;
+      localStorage.setItem('chameleon_pid', playerId);
+    }
+  });
+
+  socket.on('state:public', state => {
+    publicState = state;
+    renderLobby(state);
+    if (['dealing','hinting','voting','reveal'].includes(state.phase)) {
+      location.href = `/game.html?code=${lobbyCode}`;
+    }
+  });
+
+  socket.on('error:msg', m => toast(m, true));
+
+  function renderLobby(state) {
+    const isHost = state.hostId === myPid;
+    document.getElementById('phase-badge').textContent =
+      { lobby: 'Waiting', dealing: 'Starting…', reveal: 'Results' }[state.phase] || state.phase;
+
+    document.getElementById('player-list').innerHTML = state.players.map(p => `
+      <div class="player-chip">
+        <span class="dot ${p.connected ? 'online' : ''}"></span>
+        ${p.isHost ? '<span class="crown">♛</span>' : ''}
+        <span>${esc(p.name)}</span>
+        <span class="muted">${p.score}pt${p.score!==1?'s':''}</span>
+      </div>
+    `).join('');
+
+    document.getElementById('settings-card').style.display = isHost ? '' : 'none';
+    document.getElementById('host-controls').style.display = isHost ? '' : 'none';
+
+    if (isHost) {
+      document.getElementById('s-spyMode').value  = state.settings.spyMode;
+      document.getElementById('s-spyCount').value = state.settings.spyCount;
+      document.getElementById('start-btn').disabled = state.players.length < 3;
+    }
+
+    const hasPoints = state.players.some(p => p.score > 0);
+    document.getElementById('scoreboard').style.display = hasPoints ? '' : 'none';
+    if (hasPoints) {
+      const sorted = [...state.players].sort((a,b) => b.score - a.score);
+      document.getElementById('score-list').innerHTML = sorted.map((p,i) => `
+        <div class="score-row">
+          <span>${i===0?'🥇':i===1?'🥈':i===2?'🥉':'   '} ${esc(p.name)}</span>
+          <span class="score-pts">${p.score}pts</span>
+        </div>
+      `).join('');
+    }
+  }
+
+  function startRound() {
+    socket.emit('round:start', { lobbyCode, playerId: myPid });
+  }
+
+  function saveSettings() {
+    socket.emit('settings:update', {
+      lobbyCode, playerId: myPid,
+      settings: {
+        spyMode:  document.getElementById('s-spyMode').value,
+        spyCount: +document.getElementById('s-spyCount').value,
+      }
+    });
+    toast('Settings saved');
+  }
+
+  function resetScores() {
+    if (!confirm('Reset all scores to 0?')) return;
+    socket.emit('scores:reset', { lobbyCode, playerId: myPid });
+  }
+
+  function copyCode() {
+    navigator.clipboard.writeText(lobbyCode)
+      .then(() => toast('Code copied!'))
+      .catch(() => toast(lobbyCode));
+  }
+
+  function leaveGame() {
+    socket.emit('lobby:leave', { lobbyCode, playerId: myPid });
+    localStorage.removeItem('chameleon_lobby');
+    localStorage.removeItem('chameleon_pid');
+    location.href = '/';
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  let _tt;
+  function toast(msg, err=false) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.borderColor = err ? 'var(--danger)' : 'var(--border)';
+    t.classList.add('show');
+    clearTimeout(_tt);
+    _tt = setTimeout(() => t.classList.remove('show'), 3000);
+  }
+</script>
+</body>
+</html>

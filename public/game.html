@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chameleon – Game</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="flex-between mb-16">
+    <div class="flex gap-8">
+      <h2 style="font-family:monospace;letter-spacing:0.08em" id="lobby-code-hdr"></h2>
+      <span class="phase-badge" id="phase-badge">…</span>
+    </div>
+    <div class="flex gap-8">
+      <div id="my-role-tag"></div>
+      <button class="btn-secondary btn-sm" onclick="copyCode()">Copy</button>
+      <button class="btn-secondary btn-sm" onclick="leaveGame()">Leave</button>
+    </div>
+  </div>
+
+  <!-- Players strip -->
+  <div class="card mb-16" style="padding:10px 12px">
+    <div class="player-list" id="player-strip"></div>
+  </div>
+
+  <!-- Dealing -->
+  <div id="panel-dealing" style="display:none">
+    <div class="card text-center">
+      <h2>Round starting…</h2>
+      <p class="muted" style="margin-top:6px">Cards are being dealt</p>
+    </div>
+  </div>
+
+  <!-- Hinting -->
+  <div id="panel-hinting" style="display:none">
+    <div class="card mb-16">
+      <div class="flex-between mb-8">
+        <div>
+          <h3 style="margin:0 0 2px">Topic</h3>
+          <span id="topic-label" style="font-size:1rem;font-weight:600"></span>
+        </div>
+        <span id="spy-indicator"></span>
+      </div>
+      <p id="role-message" class="muted mb-8" style="font-size:0.83rem"></p>
+      <div class="word-grid" id="word-grid"></div>
+    </div>
+
+    <div class="card mb-16">
+      <h3>Your Clue</h3>
+      <p class="muted mb-8" style="font-size:0.82rem">One word that relates to the secret word — without naming it.</p>
+      <div class="flex gap-8">
+        <input id="hint-input" type="text" maxlength="80" placeholder="Your clue…" oninput="updateHint()">
+        <button class="btn-primary" id="hint-submit-btn" onclick="submitHint()">Submit</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Clues</h3>
+      <div class="hints-list" id="hints-list"></div>
+    </div>
+  </div>
+
+  <!-- Voting -->
+  <div id="panel-voting" style="display:none">
+    <div class="card mb-16">
+      <h3>All Clues</h3>
+      <div class="hints-list" id="hints-list-vote"></div>
+    </div>
+    <div class="card mb-16" id="vote-panel">
+      <h3>Who is the Chameleon?</h3>
+      <div class="vote-list" id="vote-list"></div>
+      <p class="muted" id="vote-status" style="margin-top:10px;font-size:0.82rem"></p>
+    </div>
+    <div class="card" id="cham-guess-panel" style="display:none">
+      <h3>You were caught! Guess the secret word.</h3>
+      <div id="cham-guess-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:12px"></div>
+      <button class="btn-primary wide-btn" id="cham-guess-btn" onclick="submitGuess()" disabled>Guess</button>
+    </div>
+  </div>
+
+  <!-- Reveal -->
+  <div id="panel-reveal" style="display:none">
+    <div id="result-banner-wrap" class="mb-16"></div>
+
+    <div class="card mb-16">
+      <h3>All Clues</h3>
+      <div class="hints-list" id="hints-list-reveal"></div>
+    </div>
+
+    <div class="card mb-16">
+      <h3>Votes</h3>
+      <div id="votes-summary"></div>
+    </div>
+
+    <div class="card mb-16">
+      <h3>Points This Round</h3>
+      <div id="score-deltas"></div>
+    </div>
+
+    <div class="card mb-16">
+      <h3>Scoreboard</h3>
+      <div id="score-list"></div>
+    </div>
+
+    <div id="host-end-btn" style="display:none">
+      <button class="btn-primary wide-btn" onclick="endRound()">Back to Lobby</button>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast"></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket    = io();
+  const params    = new URLSearchParams(location.search);
+  const lobbyCode = params.get('code')?.toUpperCase();
+  let myPid       = localStorage.getItem('chameleon_pid');
+  const myToken   = localStorage.getItem('chameleon_token');
+
+  if (!lobbyCode || !myPid) location.href = '/';
+
+  document.getElementById('lobby-code-hdr').textContent = lobbyCode;
+
+  let publicSt  = null;
+  let privateSt = null;
+  let myVote    = null;
+  let guessWord = null;
+
+  socket.on('connect', () => socket.emit('lobby:reconnect', { token: myToken }));
+  socket.on('lobby:joined', ({ playerId }) => {
+    if (playerId && playerId !== myPid) {
+      myPid = playerId;
+      localStorage.setItem('chameleon_pid', playerId);
+    }
+  });
+
+  socket.on('state:public', state => { publicSt = state; render(); });
+  socket.on('state:private', priv  => { privateSt = priv; render(); });
+  socket.on('hint:submitted', () => {});
+  socket.on('vote:cast', () => { if (publicSt) updateVoteStatus(); });
+
+  socket.on('chameleon:guess_prompt', () => {
+    document.getElementById('cham-guess-panel').style.display = '';
+    buildChamGuessGrid();
+    toast('You were caught! Pick the secret word to save yourself.');
+  });
+
+  socket.on('error:msg', m => toast(m, true));
+
+  // ── Main render ──────────────────────────────────────────────────────────
+
+  function render() {
+    if (!publicSt) return;
+    const phase  = publicSt.phase;
+    const isHost = publicSt.hostId === myPid;
+
+    document.getElementById('phase-badge').textContent = phaseLabel(phase);
+
+    document.getElementById('player-strip').innerHTML = publicSt.players.map(p => `
+      <div class="player-chip">
+        <span class="dot ${p.connected?'online':''}"></span>
+        ${p.isHost ? '<span class="crown">♛</span>' : ''}
+        <span>${esc(p.name)}</span>
+        <span class="muted">${p.score}pt${p.score!==1?'s':''}</span>
+      </div>
+    `).join('');
+
+    if (privateSt) {
+      document.getElementById('my-role-tag').innerHTML = privateSt.isChameleon
+        ? '<span class="spy-tag">🦎 Chameleon</span>'
+        : '<span class="phase-badge" style="border-color:var(--success);color:var(--success)">✔ Know the word</span>';
+    }
+
+    ['dealing','hinting','voting','reveal'].forEach(p => {
+      document.getElementById(`panel-${p}`).style.display = phase === p ? '' : 'none';
+    });
+
+    if (phase === 'hinting' && privateSt) renderHinting();
+    if (phase === 'voting'  && privateSt) renderVoting();
+    if (phase === 'reveal'  && publicSt.roundResult) renderReveal(isHost);
+    if (phase === 'lobby')  location.href = `/lobby.html?code=${lobbyCode}`;
+  }
+
+  // ── Hinting ──────────────────────────────────────────────────────────────
+
+  function renderHinting() {
+    document.getElementById('topic-label').textContent = publicSt.topic;
+
+    const spyEl = document.getElementById('spy-indicator');
+    if (privateSt.isChameleon) {
+      const label = { live:'Live spy', sealed:'Sealed spy', none:'No spy' }[publicSt.settings.spyMode] || '';
+      spyEl.innerHTML = `<span class="spy-tag">🕵️ ${label}</span>`;
+    } else {
+      spyEl.innerHTML = '';
+    }
+
+    document.getElementById('role-message').textContent = privateSt.isChameleon
+      ? '🦎 You are the Chameleon. Blend in — give a clue that sounds like you know the word.'
+      : '🎯 The secret word is highlighted. Give a clue without saying it directly.';
+
+    const grid   = privateSt.grid || [];
+    const secret = privateSt.secretWord;
+    document.getElementById('word-grid').innerHTML = grid.map(w => `
+      <div class="word-cell ${w === secret ? 'highlighted' : ''}">${esc(w)}</div>
+    `).join('');
+
+    renderHintsList('hints-list', privateSt.hints);
+
+    const myHint = privateSt.hints?.[myPid];
+    if (myHint?.submitted) {
+      document.getElementById('hint-input').disabled = true;
+      document.getElementById('hint-submit-btn').disabled = true;
+      document.getElementById('hint-input').value = myHint.text;
+    }
+  }
+
+  function renderHintsList(elId, hints) {
+    if (!hints || !publicSt) return;
+    document.getElementById(elId).innerHTML = publicSt.players.map(p => {
+      const h    = hints[p.id] || {};
+      const shown = h.text !== null && h.text !== undefined;
+      return `
+        <div class="hint-row">
+          <span class="hint-name">${esc(p.name)}${p.id===myPid?' <span style="color:var(--muted);font-weight:400">(you)</span>':''}</span>
+          <span class="hint-text ${shown?'revealed':''}">
+            ${shown ? esc(h.text || '…') : (h.submitted ? '(submitted)' : '(typing…)')}
+          </span>
+          <span class="hint-status">${h.submitted ? '✓' : ''}</span>
+        </div>`;
+    }).join('');
+  }
+
+  function updateHint() {
+    socket.emit('hint:update', { lobbyCode, playerId: myPid, text: document.getElementById('hint-input').value });
+  }
+
+  function submitHint() {
+    socket.emit('hint:submit', { lobbyCode, playerId: myPid });
+    document.getElementById('hint-submit-btn').disabled = true;
+    document.getElementById('hint-input').disabled = true;
+  }
+
+  // ── Voting ───────────────────────────────────────────────────────────────
+
+  function renderVoting() {
+    renderHintsList('hints-list-vote', privateSt.hints);
+    const voteList = document.getElementById('vote-list');
+    voteList.innerHTML = publicSt.players.map(p => `
+      <button class="vote-btn ${(myVote||privateSt.myVote)===p.id?'voted':''}"
+        onclick="castVote('${p.id}')" ${(myVote||privateSt.myVote)?'disabled':''}>
+        ${esc(p.name)}
+      </button>
+    `).join('');
+    updateVoteStatus();
+  }
+
+  function updateVoteStatus() {
+    const el = document.getElementById('vote-status');
+    if (el) el.textContent = (myVote||privateSt?.myVote)
+      ? 'Vote cast. Waiting for others…'
+      : 'Tap a name to vote for who you think is the Chameleon.';
+  }
+
+  function castVote(targetId) {
+    myVote = targetId;
+    socket.emit('vote:cast', { lobbyCode, playerId: myPid, targetId });
+    renderVoting();
+  }
+
+  function buildChamGuessGrid() {
+    if (!privateSt?.grid) return;
+    document.getElementById('cham-guess-grid').innerHTML = privateSt.grid.map(w => `
+      <div class="word-cell selectable" onclick="selectGuess(this,'${esc(w)}')">${esc(w)}</div>
+    `).join('');
+  }
+
+  function selectGuess(el, word) {
+    document.querySelectorAll('#cham-guess-grid .word-cell').forEach(c => c.classList.remove('selected'));
+    el.classList.add('selected');
+    guessWord = word;
+    document.getElementById('cham-guess-btn').disabled = false;
+  }
+
+  function submitGuess() {
+    if (!guessWord) return;
+    socket.emit('chameleon:guess', { lobbyCode, playerId: myPid, word: guessWord });
+    document.getElementById('cham-guess-btn').disabled = true;
+  }
+
+  // ── Reveal ───────────────────────────────────────────────────────────────
+
+  function renderReveal(isHost) {
+    const r      = publicSt.roundResult;
+    const nameOf = id => publicSt.players.find(p=>p.id===id)?.name || id;
+
+    const outcomes = {
+      chameleon_escaped:      ['loss', `🦎 Chameleon escaped! ${nameOf(r.chameleonId)} wins.`],
+      chameleon_guessed_word: ['loss', `🦎 Chameleon guessed the word! ${nameOf(r.chameleonId)} wins.`],
+      chameleon_caught:       ['win',  `✅ Chameleon caught! ${nameOf(r.chameleonId)} was the impostor.`],
+    };
+    const [cls, msg] = outcomes[r.outcome] || ['neutral', r.outcome];
+    document.getElementById('result-banner-wrap').innerHTML = `
+      <div class="result-banner ${cls}">${msg}<br>
+        <span style="font-size:.88rem;font-weight:400;opacity:.85">
+          Secret word: <strong>${esc(r.secretWord)}</strong>
+          ${r.chameleonGuessWord ? ` · Chameleon guessed: <strong>${esc(r.chameleonGuessWord)}</strong>` : ''}
+        </span>
+      </div>`;
+
+    renderHintsList('hints-list-reveal', privateSt?.hints);
+
+    document.getElementById('votes-summary').innerHTML = publicSt.players.map(p => {
+      const voted = r.votes?.[p.id];
+      return `<div class="score-row">
+        <span>${esc(p.name)}</span>
+        <span class="muted">→ ${voted ? esc(nameOf(voted)) : '—'}</span>
+      </div>`;
+    }).join('');
+
+    document.getElementById('score-deltas').innerHTML = publicSt.players.map(p => {
+      const d = r.deltas?.[p.id] || 0;
+      return `<div class="score-row">
+        <span>${esc(p.name)}</span>
+        <span class="${d>0?'score-pts':'muted'}">${d>0?'+':''}${d}</span>
+      </div>`;
+    }).join('');
+
+    const sorted = [...publicSt.players].sort((a,b) => b.score-a.score);
+    document.getElementById('score-list').innerHTML = sorted.map((p,i) => `
+      <div class="score-row">
+        <span>${i===0?'🥇':i===1?'🥈':i===2?'🥉':'   '} ${esc(p.name)}</span>
+        <span class="score-pts">${p.score}pts</span>
+      </div>
+    `).join('');
+
+    document.getElementById('host-end-btn').style.display = isHost ? '' : 'none';
+  }
+
+  // ── Controls ─────────────────────────────────────────────────────────────
+
+  function endRound() {
+    socket.emit('round:end', { lobbyCode, playerId: myPid });
+  }
+
+  function leaveGame() {
+    socket.emit('lobby:leave', { lobbyCode, playerId: myPid });
+    localStorage.removeItem('chameleon_lobby');
+    localStorage.removeItem('chameleon_pid');
+    location.href = '/';
+  }
+
+  function copyCode() {
+    navigator.clipboard.writeText(lobbyCode)
+      .then(() => toast('Code copied!'))
+      .catch(() => toast(lobbyCode));
+  }
+
+  // ── Utils ────────────────────────────────────────────────────────────────
+
+  function phaseLabel(p) {
+    return { lobby:'Lobby', dealing:'Starting…', hinting:'Give Clues', voting:'Vote', reveal:'Results' }[p] || p;
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  let _tt;
+  function toast(msg, err=false) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.borderColor = err ? 'var(--danger)' : 'var(--border)';
+    t.classList.add('show');
+    clearTimeout(_tt);
+    _tt = setTimeout(() => t.classList.remove('show'), 3500);
+  }
+</script>
+</body>
+</html>
