@@ -51,10 +51,19 @@ class LobbyManager {
     return this.tokenToLobby.get(token) || null;
   }
 
-  /** Remove lobbies with no players at all */
+  /** Check if a lobby is effectively empty (no players or all offline) */
+  isLobbyEffectivelyEmpty(gs) {
+    if (gs.players.size === 0) return true;
+    const connectedPlayers = [...gs.players.values()].filter(p => p.connected);
+    return connectedPlayers.length === 0;
+  }
+
+  /** Remove lobbies with no players at all or all players offline */
   pruneEmpty() {
     for (const [code, gs] of this.lobbies) {
-      if (gs.players.size === 0) this.lobbies.delete(code);
+      if (this.isLobbyEffectivelyEmpty(gs)) {
+        this.lobbies.delete(code);
+      }
     }
   }
 }

@@ -41,7 +41,23 @@
         <label>Players Chameleon Can Spy On</label>
         <input id="s-spyCount" type="number" min="0" max="20" value="3">
       </div>
-    </div>
+      <div class="form-group">
+        <label>Hinting Time Limit (seconds, 0 = unlimited)</label>
+        <input id="s-hintingTimeout" type="number" min="0" max="300" value="0">
+      </div>
+      <div class="form-group">
+        <label>Chameleon Guess Time (seconds)</label>
+        <input id="s-chameleonGuessTimeout" type="number" min="1" max="300" value="20">
+      </div>
+      <div class="form-group">
+         <label>Wordpack Tiers</label>
+         <div style="display:flex;gap:6px;flex-wrap:wrap" id="s-packTiers">
+           <button type="button" class="tier-btn active" data-tier="normal">Normal</button>
+           <button type="button" class="tier-btn" data-tier="special">Special</button>
+           <button type="button" class="tier-btn" data-tier="xtra">Xtra</button>
+         </div>
+       </div>
+     </div>
     <div class="flex gap-8">
       <button class="btn-primary btn-sm" onclick="saveSettings()">Save</button>
       <button class="btn-danger btn-sm" onclick="resetScores()">Reset scores</button>
@@ -98,6 +114,15 @@
 
   socket.on('error:msg', m => toast(m, true));
 
+  document.getElementById('s-packTiers').addEventListener('click', e => {
+    const btn = e.target.closest('.tier-btn');
+    if (!btn) return;
+    const active = [...document.querySelectorAll('.tier-btn.active')];
+    // Prevent deselecting the last active tier
+    if (btn.classList.contains('active') && active.length === 1) return;
+    btn.classList.toggle('active');
+  });
+
   function renderLobby(state) {
     const isHost = state.hostId === myPid;
     document.getElementById('phase-badge').textContent =
@@ -118,6 +143,12 @@
     if (isHost) {
       document.getElementById('s-spyMode').value  = state.settings.spyMode;
       document.getElementById('s-spyCount').value = state.settings.spyCount;
+      document.getElementById('s-hintingTimeout').value = state.settings.hintingTimeout;
+      document.getElementById('s-chameleonGuessTimeout').value = state.settings.chameleonGuessTimeout;
+      const activeTiers = new Set(state.settings.packTiers || ['normal']);
+      document.querySelectorAll('.tier-btn').forEach(btn => {
+        btn.classList.toggle('active', activeTiers.has(btn.dataset.tier));
+      });
       document.getElementById('start-btn').disabled = state.players.length < 3;
     }
 
@@ -144,6 +175,9 @@
       settings: {
         spyMode:  document.getElementById('s-spyMode').value,
         spyCount: +document.getElementById('s-spyCount').value,
+        hintingTimeout: +document.getElementById('s-hintingTimeout').value,
+        chameleonGuessTimeout: +document.getElementById('s-chameleonGuessTimeout').value,
+        packTiers: [...document.querySelectorAll('.tier-btn.active')].map(b => b.dataset.tier),
       }
     });
     toast('Settings saved');

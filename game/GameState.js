@@ -14,6 +14,9 @@ const PHASES = {
 const DEFAULT_SETTINGS = {
   spyMode:              'sealed',  // 'live' | 'sealed' | 'none'
   spyCount:             3,         // number of players chameleon can spy on
+  hintingTimeout:       0,         // seconds (0 = disabled)
+  chameleonGuessTimeout: 20,       // seconds
+  packTiers:            ['normal'], // array: 'normal' | 'special' | 'xtra'
 };
 
 class GameState {
@@ -23,6 +26,7 @@ class GameState {
     this.players     = new Map(); // playerId → { name, score, connected, socketId }
     this.hostId      = null;
     this.settings    = { ...DEFAULT_SETTINGS };
+    this.pendingTimeouts = []; // Track active timeouts for cleanup
 
     // Round-specific state (reset each round)
     this._resetRound();
@@ -39,6 +43,19 @@ class GameState {
     this.roundResult  = null;
     this.chameleonGuessWord = null;
     this.submitOrder  = [];          // order in which players submitted hints (for spy targeting)
+  }
+
+  // ── Timeout management ──────────────────────────────────────────────────────
+
+  registerTimeout(timeoutId) {
+    this.pendingTimeouts.push(timeoutId);
+  }
+
+  clearAllTimeouts() {
+    for (const timeoutId of this.pendingTimeouts) {
+      clearTimeout(timeoutId);
+    }
+    this.pendingTimeouts = [];
   }
 
   // ── Player management ──────────────────────────────────────────────────────
@@ -95,7 +112,7 @@ class GameState {
     if (this.players.size < 3) throw new Error('Need at least 3 players');
     this._resetRound();
 
-    const { topic, words, secretWord } = generateRound();
+    const { topic, words, secretWord } = generateRound(this.settings.packTiers);
     this.topic      = topic;
     this.words      = words;
     this.secretWord = secretWord;
@@ -146,8 +163,18 @@ class GameState {
     const isChameleon = playerId === this.chameleonId;
     const result = {};
     
-    // Determine which players chameleon can see (first N in submitOrder)
-    const spiedPlayers = new Set(this.submitOrder.slice(0, this.settings.spyCount));
+    // Determine which players have started typing (have non-empty text)
+    const playersWithHints = [...this.hints.entries()]
+      .filter(([pid, h]) => pid !== this.chameleonId && h.text && h.text.trim().length > 0)
+      .map(([pid]) => pid);
+    
+    // For spy targeting: use submitOrder if available, otherwise fall back to playersWithHints
+    const spyTargets = this.submitOrder.length > 0 
+      ? this.submitOrder 
+      : playersWithHints;
+    
+    // Determine which players chameleon can spy on (first N)
+    const spiedPlayers = new Set(spyTargets.slice(0, this.settings.spyCount));
     
     for (const [pid, h] of this.hints) {
       if (pid === playerId) {
@@ -160,7 +187,7 @@ class GameState {
       } else if (isChameleon) {
         // Spy mode logic with spyCount limit
         if (this.settings.spyMode === 'live') {
-          // Chameleon can see live updates from first N players
+          // Chameleon can see live updates from first N players (those who have started typing)
           if (spiedPlayers.has(pid)) {
             result[pid] = { text: h.text, submitted: h.submitted };
           } else {
@@ -232,6 +259,7 @@ class GameState {
   }
 
   returnToLobby() {
+    this.clearAllTimeouts();
     this.phase = PHASES.LOBBY;
     this._resetRound();
   }

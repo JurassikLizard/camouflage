@@ -9,6 +9,21 @@
 <body>
 <div class="page">
 
+  <!-- Sticky Board Section -->
+  <div class="board-section" id="board-section" style="display:none">
+    <div class="flex-between mb-12" style="padding:0 16px">
+      <div>
+        <h3 style="margin:0 0 2px;color:var(--muted)">Topic</h3>
+        <span id="topic-label" style="font-size:1rem;font-weight:600"></span>
+      </div>
+      <div>
+        <span id="spy-indicator"></span>
+      </div>
+    </div>
+    <div class="word-grid" id="word-grid"></div>
+    <p id="role-message" class="muted" style="font-size:0.83rem;padding:12px 16px;margin:0;border-top:1px solid var(--border)"></p>
+  </div>
+
   <!-- Header -->
   <div class="flex-between mb-16">
     <div class="flex gap-8">
@@ -38,19 +53,10 @@
   <!-- Hinting -->
   <div id="panel-hinting" style="display:none">
     <div class="card mb-16">
-      <div class="flex-between mb-8">
-        <div>
-          <h3 style="margin:0 0 2px">Topic</h3>
-          <span id="topic-label" style="font-size:1rem;font-weight:600"></span>
-        </div>
-        <span id="spy-indicator"></span>
+      <div class="flex-between" style="margin-bottom:12px">
+        <h3>Your Clue</h3>
+        <span id="hinting-timer" class="phase-badge" style="display:none;background:var(--danger);color:white"></span>
       </div>
-      <p id="role-message" class="muted mb-8" style="font-size:0.83rem"></p>
-      <div class="word-grid" id="word-grid"></div>
-    </div>
-
-    <div class="card mb-16">
-      <h3>Your Clue</h3>
       <p class="muted mb-8" style="font-size:0.82rem">One word that relates to the secret word — without naming it.</p>
       <div class="flex gap-8">
         <input id="hint-input" type="text" maxlength="80" placeholder="Your clue…" oninput="updateHint()">
@@ -76,9 +82,11 @@
       <p class="muted" id="vote-status" style="margin-top:10px;font-size:0.82rem"></p>
     </div>
     <div class="card" id="cham-guess-panel" style="display:none">
-      <h3>You were caught! Guess the secret word.</h3>
-      <div id="cham-guess-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:12px"></div>
-      <button class="btn-primary wide-btn" id="cham-guess-btn" onclick="submitGuess()" disabled>Guess</button>
+      <div class="flex-between" style="margin-bottom:12px">
+        <p class="muted" style="font-size:0.82rem;margin:0">You were caught! Click on the secret word from the grid above to save yourself.</p>
+        <span id="guess-timer" class="phase-badge" style="background:var(--danger);color:white"></span>
+      </div>
+      <button class="btn-primary wide-btn" id="cham-guess-btn" onclick="submitGuess()" disabled>Submit Guess</button>
     </div>
   </div>
 
@@ -131,6 +139,11 @@
   let privateSt = null;
   let myVote    = null;
   let guessWord = null;
+  
+  // Timer management
+  let timerInterval = null;
+  let hintingStartTime = null;
+  let guessStartTime = null;
 
   socket.on('connect', () => socket.emit('lobby:reconnect', { token: myToken }));
   socket.on('lobby:joined', ({ playerId }) => {
@@ -147,11 +160,62 @@
 
   socket.on('chameleon:guess_prompt', () => {
     document.getElementById('cham-guess-panel').style.display = '';
-    buildChamGuessGrid();
-    toast('You were caught! Pick the secret word to save yourself.');
+    makeBoardSelectable();
+    stopTimer();
+    if (publicSt) startGuessTimer(publicSt.settings.chameleonGuessTimeout);
+    toast('You were caught! Click the secret word from the grid above.');
   });
 
   socket.on('error:msg', m => toast(m, true));
+
+  // ── Timer management ──────────────────────────────────────────────────────
+
+  function startHintingTimer(hintingTimeout) {
+    if (!hintingTimeout || hintingTimeout <= 0) {
+      document.getElementById('hinting-timer').style.display = 'none';
+      return;
+    }
+    hintingStartTime = Date.now();
+    document.getElementById('hinting-timer').style.display = '';
+    updateHintingTimer(hintingTimeout);
+  }
+
+  function updateHintingTimer(hintingTimeout) {
+    if (timerInterval) clearInterval(timerInterval);
+    timerInterval = setInterval(() => {
+      if (!hintingStartTime || !publicSt) return clearInterval(timerInterval);
+      const elapsed = (Date.now() - hintingStartTime) / 1000;
+      const remaining = Math.max(0, hintingTimeout - elapsed);
+      const el = document.getElementById('hinting-timer');
+      if (el) el.textContent = Math.ceil(remaining) + 's';
+      if (remaining <= 0) clearInterval(timerInterval);
+    }, 100);
+  }
+
+  function startGuessTimer(guessTimeout) {
+    guessStartTime = Date.now();
+    document.getElementById('guess-timer').textContent = guessTimeout + 's';
+    updateGuessTimer(guessTimeout);
+  }
+
+  function updateGuessTimer(guessTimeout) {
+    if (timerInterval) clearInterval(timerInterval);
+    timerInterval = setInterval(() => {
+      if (!guessStartTime || !publicSt) return clearInterval(timerInterval);
+      const elapsed = (Date.now() - guessStartTime) / 1000;
+      const remaining = Math.max(0, guessTimeout - elapsed);
+      const el = document.getElementById('guess-timer');
+      if (el) el.textContent = Math.ceil(remaining) + 's';
+      if (remaining <= 0) clearInterval(timerInterval);
+    }, 100);
+  }
+
+  function stopTimer() {
+    if (timerInterval) clearInterval(timerInterval);
+    timerInterval = null;
+    hintingStartTime = null;
+    guessStartTime = null;
+  }
 
   // ── Main render ──────────────────────────────────────────────────────────
 
@@ -177,14 +241,31 @@
         : '<span class="phase-badge" style="border-color:var(--success);color:var(--success)">✔ Know the word</span>';
     }
 
+    // Show board during active phases
+    const activePhases = ['hinting', 'voting', 'reveal'];
+    document.getElementById('board-section').style.display = (activePhases.includes(phase) && privateSt) ? '' : 'none';
+
     ['dealing','hinting','voting','reveal'].forEach(p => {
       document.getElementById(`panel-${p}`).style.display = phase === p ? '' : 'none';
     });
 
-    if (phase === 'hinting' && privateSt) renderHinting();
-    if (phase === 'voting'  && privateSt) renderVoting();
-    if (phase === 'reveal'  && publicSt.roundResult) renderReveal(isHost);
-    if (phase === 'lobby')  location.href = `/lobby.html?code=${lobbyCode}`;
+    if (phase === 'hinting' && privateSt) {
+      stopTimer();
+      startHintingTimer(publicSt.settings.hintingTimeout);
+      renderHinting();
+    }
+    if (phase === 'voting'  && privateSt) {
+      stopTimer();
+      renderVoting();
+    }
+    if (phase === 'reveal'  && publicSt.roundResult) {
+      stopTimer();
+      renderReveal(isHost);
+    }
+    if (phase === 'lobby') {
+      stopTimer();
+      location.href = `/lobby.html?code=${lobbyCode}`;
+    }
   }
 
   // ── Hinting ──────────────────────────────────────────────────────────────
@@ -249,6 +330,17 @@
   // ── Voting ───────────────────────────────────────────────────────────────
 
   function renderVoting() {
+    // Update the board display for voting phase
+    document.getElementById('topic-label').textContent = publicSt.topic;
+    document.getElementById('role-message').style.display = 'none';
+    document.getElementById('spy-indicator').innerHTML = '';
+
+    const grid   = privateSt.grid || [];
+    const secret = privateSt.secretWord;
+    document.getElementById('word-grid').innerHTML = grid.map(w => `
+      <div class="word-cell ${w === secret ? 'highlighted' : ''}">${esc(w)}</div>
+    `).join('');
+
     renderHintsList('hints-list-vote', privateSt.hints);
     const voteList = document.getElementById('vote-list');
     voteList.innerHTML = publicSt.players.map(p => `
@@ -273,18 +365,17 @@
     renderVoting();
   }
 
-  function buildChamGuessGrid() {
-    if (!privateSt?.grid) return;
-    document.getElementById('cham-guess-grid').innerHTML = privateSt.grid.map(w => `
-      <div class="word-cell selectable" onclick="selectGuess(this,'${esc(w)}')">${esc(w)}</div>
-    `).join('');
-  }
-
-  function selectGuess(el, word) {
-    document.querySelectorAll('#cham-guess-grid .word-cell').forEach(c => c.classList.remove('selected'));
-    el.classList.add('selected');
-    guessWord = word;
-    document.getElementById('cham-guess-btn').disabled = false;
+  function makeBoardSelectable() {
+    const cells = document.querySelectorAll('#word-grid .word-cell');
+    cells.forEach(cell => {
+      cell.classList.add('selectable');
+      cell.onclick = function(e) {
+        cells.forEach(c => c.classList.remove('selected'));
+        this.classList.add('selected');
+        guessWord = this.textContent.trim();
+        document.getElementById('cham-guess-btn').disabled = false;
+      };
+    });
   }
 
   function submitGuess() {
@@ -298,6 +389,17 @@
   function renderReveal(isHost) {
     const r      = publicSt.roundResult;
     const nameOf = id => publicSt.players.find(p=>p.id===id)?.name || id;
+
+    // Update the board display for reveal phase
+    document.getElementById('topic-label').textContent = publicSt.topic;
+    document.getElementById('role-message').style.display = 'none';
+    document.getElementById('spy-indicator').innerHTML = '';
+
+    const grid   = privateSt.grid || [];
+    const secret = privateSt.secretWord;
+    document.getElementById('word-grid').innerHTML = grid.map(w => `
+      <div class="word-cell ${w === secret ? 'highlighted' : ''}">${esc(w)}</div>
+    `).join('');
 
     const outcomes = {
       chameleon_escaped:      ['loss', `🦎 Chameleon escaped! ${nameOf(r.chameleonId)} wins.`],
@@ -345,10 +447,12 @@
   // ── Controls ─────────────────────────────────────────────────────────────
 
   function endRound() {
+    stopTimer();
     socket.emit('round:end', { lobbyCode, playerId: myPid });
   }
 
   function leaveGame() {
+    stopTimer();
     socket.emit('lobby:leave', { lobbyCode, playerId: myPid });
     localStorage.removeItem('chameleon_lobby');
     localStorage.removeItem('chameleon_pid');

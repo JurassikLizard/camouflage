@@ -136,7 +136,7 @@ io.on('connection', socket => {
   socket.on('settings:update', ({ lobbyCode, playerId, settings }) => {
     const gs = lobbyManager.getLobby(lobbyCode);
     if (!gs || gs.hostId !== playerId) return err(socket, 'Not authorised');
-    const allowed = ['spyMode','spyCount'];
+    const allowed = ['spyMode','spyCount','hintingTimeout','chameleonGuessTimeout','packTiers'];
     for (const k of allowed) {
       if (settings[k] !== undefined) gs.settings[k] = settings[k];
     }
@@ -157,12 +157,27 @@ io.on('connection', socket => {
       return err(socket, e.message);
     }
     broadcastLobby(gs);
-    setTimeout(() => {
+    
+    // Auto-transition from DEALING to HINTING after 3 seconds
+    const dealingTimeout = setTimeout(() => {
       if (gs.phase === PHASES.DEALING) {
         gs.beginHinting();
         broadcastLobby(gs);
+        
+        // If hinting timeout is enabled, set up auto-transition to voting
+        if (gs.settings.hintingTimeout > 0) {
+          const hintingTimeout = setTimeout(() => {
+            if (gs.phase === PHASES.HINTING) {
+              gs.phase = PHASES.VOTING;
+              io.to(gs.lobbyCode).emit('error:msg', `Hinting time expired. Moving to voting.`);
+              broadcastLobby(gs);
+            }
+          }, gs.settings.hintingTimeout * 1000);
+          gs.registerTimeout(hintingTimeout);
+        }
       }
     }, 3000);
+    gs.registerTimeout(dealingTimeout);
   });
 
   socket.on('hint:update', ({ lobbyCode, playerId, text }) => {
@@ -214,12 +229,13 @@ io.on('connection', socket => {
         if (cham?.socketId) {
           io.to(cham.socketId).emit('chameleon:guess_prompt');
         }
-        setTimeout(() => {
+        const guessTimeout = setTimeout(() => {
           if (gs.phase !== PHASES.REVEAL) {
             gs.finalizeRound();
             broadcastLobby(gs);
           }
-        }, 20000);
+        }, gs.settings.chameleonGuessTimeout * 1000);
+        gs.registerTimeout(guessTimeout);
       } else {
         broadcastLobby(gs);
       }
@@ -264,6 +280,7 @@ io.on('connection', socket => {
           }
         }
       }
+      // Prune empty lobbies and lobbies where all players are offline
       lobbyManager.pruneEmpty();
       broadcastPublicLobbies();
     }, 3000);

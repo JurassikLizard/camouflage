@@ -49,6 +49,22 @@ body {
 .page {
   width: 100%;
   max-width: 860px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Sticky Board Section */
+.board-section {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: linear-gradient(to bottom, var(--bg), var(--bg) 85%, rgba(13,17,14,0.8));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  backdrop-filter: blur(4px);
 }
 
 h1, h2, h3 {
@@ -161,6 +177,29 @@ button:disabled {
   font-family: var(--mono);
   letter-spacing: 0.04em;
   box-shadow: 0 0 12px rgba(57,232,122,0.25);
+}
+
+.tier-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  padding: 6px 14px;
+  font-size: 0.82rem;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  transform: none !important; /* override global button hover lift */
+}
+.tier-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.tier-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  opacity: 1 !important;
 }
 
 .btn-primary:hover:not(:disabled) {
