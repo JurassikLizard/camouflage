@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Chameleon – Lobby</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="page">
@@ -29,6 +29,13 @@
   <div class="card mb-16" id="settings-card" style="display:none">
     <h3>Settings</h3>
     <div class="settings-grid">
+      <div class="form-group form-check setting-check">
+        <input type="checkbox" id="s-chaosMode">
+        <label for="s-chaosMode" style="margin:0">
+          Chaos Mode<br>
+          <span class="muted" style="font-size:0.76rem">Hide the imposter count and use two-stage voting.</span>
+        </label>
+      </div>
       <div class="form-group">
         <label>Spy Mode</label>
         <select id="s-spyMode">
@@ -141,6 +148,7 @@
     document.getElementById('host-controls').style.display = isHost ? '' : 'none';
 
     if (isHost) {
+      document.getElementById('s-chaosMode').checked = !!state.settings.chaosMode;
       document.getElementById('s-spyMode').value  = state.settings.spyMode;
       document.getElementById('s-spyCount').value = state.settings.spyCount;
       document.getElementById('s-hintingTimeout').value = state.settings.hintingTimeout;
@@ -165,20 +173,33 @@
     }
   }
 
+  function currentSettingsFromForm() {
+    return {
+      chaosMode: document.getElementById('s-chaosMode').checked,
+      spyMode:  document.getElementById('s-spyMode').value,
+      spyCount: +document.getElementById('s-spyCount').value,
+      hintingTimeout: +document.getElementById('s-hintingTimeout').value,
+      chameleonGuessTimeout: +document.getElementById('s-chameleonGuessTimeout').value,
+      packTiers: [...document.querySelectorAll('.tier-btn.active')].map(b => b.dataset.tier),
+    };
+  }
+
   function startRound() {
+    // Make Start Round use the latest visible form values.
+    // This prevents Chaos Mode from being ignored if the host checks the box
+    // and starts immediately without pressing Save first. Socket.IO preserves
+    // event order, so settings:update is processed before round:start.
+    socket.emit('settings:update', {
+      lobbyCode, playerId: myPid,
+      settings: currentSettingsFromForm(),
+    });
     socket.emit('round:start', { lobbyCode, playerId: myPid });
   }
 
   function saveSettings() {
     socket.emit('settings:update', {
       lobbyCode, playerId: myPid,
-      settings: {
-        spyMode:  document.getElementById('s-spyMode').value,
-        spyCount: +document.getElementById('s-spyCount').value,
-        hintingTimeout: +document.getElementById('s-hintingTimeout').value,
-        chameleonGuessTimeout: +document.getElementById('s-chameleonGuessTimeout').value,
-        packTiers: [...document.querySelectorAll('.tier-btn.active')].map(b => b.dataset.tier),
-      }
+      settings: currentSettingsFromForm(),
     });
     toast('Settings saved');
   }

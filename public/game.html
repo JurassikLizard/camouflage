@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Chameleon – Game</title>
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="page">
@@ -138,6 +138,8 @@
   let publicSt  = null;
   let privateSt = null;
   let myVote    = null;
+  let chaosGuessCount = null;
+  let chaosSuspects = new Set();
   let guessWord = null;
   
   // Timer management
@@ -237,7 +239,7 @@
 
     if (privateSt) {
       document.getElementById('my-role-tag').innerHTML = privateSt.isChameleon
-        ? '<span class="spy-tag">🦎 Chameleon</span>'
+        ? `<span class="spy-tag">${publicSt.settings.chaosMode ? '🌀 Imposter' : '🦎 Chameleon'}</span>`
         : '<span class="phase-badge" style="border-color:var(--success);color:var(--success)">✔ Know the word</span>';
     }
 
@@ -282,7 +284,9 @@
     }
 
     document.getElementById('role-message').textContent = privateSt.isChameleon
-      ? '🦎 You are the Chameleon. Blend in — give a clue that sounds like you know the word.'
+      ? (publicSt.settings.chaosMode
+          ? '🌀 You are an imposter. The number of imposters is hidden. Blend in with a clue that sounds right.'
+          : '🦎 You are the Chameleon. Blend in — give a clue that sounds like you know the word.')
       : '🎯 The secret word is highlighted. Give a clue without saying it directly.';
 
     const grid   = privateSt.grid || [];
@@ -342,6 +346,16 @@
     `).join('');
 
     renderHintsList('hints-list-vote', privateSt.hints);
+
+    if (publicSt.settings.chaosMode) {
+      renderChaosVoting();
+    } else {
+      renderNormalVoting();
+    }
+  }
+
+  function renderNormalVoting() {
+    document.querySelector('#vote-panel h3').textContent = 'Who is the Chameleon?';
     const voteList = document.getElementById('vote-list');
     voteList.innerHTML = publicSt.players.map(p => `
       <button class="vote-btn ${(myVote||privateSt.myVote)===p.id?'voted':''}"
@@ -352,15 +366,78 @@
     updateVoteStatus();
   }
 
+  function renderChaosVoting() {
+    document.querySelector('#vote-panel h3').textContent = 'Chaos Vote: Guess the Imposters';
+    const alreadyVoted = myVote || privateSt.myVote;
+    const max = publicSt.settings.chaosMaxImposters ?? privateSt.chaosMaxImposters ?? Math.round(publicSt.players.length / 3);
+    const selectedCount = chaosGuessCount ?? alreadyVoted?.count;
+    const selectedSuspects = alreadyVoted?.suspects || [...chaosSuspects];
+
+    const countButtons = Array.from({ length: max + 1 }, (_, n) => `
+      <button class="vote-btn ${selectedCount===n?'voted':''}"
+        onclick="selectChaosCount(${n})" ${alreadyVoted?'disabled':''}>${n}</button>
+    `).join('');
+
+    const suspectButtons = selectedCount > 0 ? publicSt.players.map(p => {
+      const picked = selectedSuspects.includes(p.id);
+      return `<button class="vote-btn ${picked?'voted':''}"
+        onclick="toggleChaosSuspect('${p.id}')" ${alreadyVoted?'disabled':''}>
+        ${esc(p.name)}
+      </button>`;
+    }).join('') : '';
+
+    document.getElementById('vote-list').innerHTML = `
+      <p class="muted mb-8" style="font-size:0.82rem">Stage 1: How many imposters are in this game?</p>
+      <div class="vote-list mb-12">${countButtons}</div>
+      ${selectedCount > 0 ? `
+        <p class="muted mb-8" style="font-size:0.82rem">Stage 2: Select exactly ${selectedCount} suspect${selectedCount!==1?'s':''}.</p>
+        <div class="vote-list mb-12">${suspectButtons}</div>
+      ` : selectedCount === 0 ? '<p class="muted mb-12" style="font-size:0.82rem">You guessed 0 imposters, so Stage 2 is skipped.</p>' : ''}
+      <button class="btn-primary wide-btn" onclick="castChaosVote()" ${alreadyVoted || !canSubmitChaosVote() ? 'disabled' : ''}>Submit Chaos Vote</button>
+    `;
+    updateVoteStatus();
+  }
+
+  function selectChaosCount(count) {
+    chaosGuessCount = count;
+    chaosSuspects = new Set();
+    renderVoting();
+  }
+
+  function toggleChaosSuspect(playerId) {
+    if (chaosSuspects.has(playerId)) chaosSuspects.delete(playerId);
+    else if (chaosSuspects.size < chaosGuessCount) chaosSuspects.add(playerId);
+    renderVoting();
+  }
+
+  function canSubmitChaosVote() {
+    if (!Number.isInteger(chaosGuessCount)) return false;
+    return chaosGuessCount === 0 || chaosSuspects.size === chaosGuessCount;
+  }
+
   function updateVoteStatus() {
     const el = document.getElementById('vote-status');
-    if (el) el.textContent = (myVote||privateSt?.myVote)
-      ? 'Vote cast. Waiting for others…'
-      : 'Tap a name to vote for who you think is the Chameleon.';
+    if (!el) return;
+    if (myVote || privateSt?.myVote) {
+      el.textContent = 'Vote cast. Waiting for others…';
+    } else if (publicSt?.settings?.chaosMode) {
+      el.textContent = 'Choose an imposter count first, then select the same number of suspects.';
+    } else {
+      el.textContent = 'Tap a name to vote for who you think is the Chameleon.';
+    }
   }
 
   function castVote(targetId) {
     myVote = targetId;
+    socket.emit('vote:cast', { lobbyCode, playerId: myPid, targetId });
+    renderVoting();
+  }
+
+  function castChaosVote() {
+    if (!canSubmitChaosVote()) return;
+    const targetId = { count: chaosGuessCount, suspects: [...chaosSuspects] };
+    myVote = targetId;
+    // Reuse the existing vote:cast route. The server stores this object as the Chaos Mode ballot.
     socket.emit('vote:cast', { lobbyCode, playerId: myPid, targetId });
     renderVoting();
   }
@@ -401,16 +478,19 @@
       <div class="word-cell ${w === secret ? 'highlighted' : ''}">${esc(w)}</div>
     `).join('');
 
+    const imposterNames = (r.imposterIds || [r.chameleonId]).filter(Boolean).map(nameOf).join(', ') || 'none';
     const outcomes = {
       chameleon_escaped:      ['loss', `🦎 Chameleon escaped! ${nameOf(r.chameleonId)} wins.`],
       chameleon_guessed_word: ['loss', `🦎 Chameleon guessed the word! ${nameOf(r.chameleonId)} wins.`],
       chameleon_caught:       ['win',  `✅ Chameleon caught! ${nameOf(r.chameleonId)} was the impostor.`],
+      chaos_scored:           ['neutral', `🌀 Chaos Mode complete. Actual imposters: ${esc(imposterNames)}.`],
     };
     const [cls, msg] = outcomes[r.outcome] || ['neutral', r.outcome];
     document.getElementById('result-banner-wrap').innerHTML = `
       <div class="result-banner ${cls}">${msg}<br>
         <span style="font-size:.88rem;font-weight:400;opacity:.85">
           Secret word: <strong>${esc(r.secretWord)}</strong>
+          ${publicSt.settings.chaosMode ? ` · Imposter count: <strong>${r.actualImposterCount}</strong>` : ''}
           ${r.chameleonGuessWord ? ` · Chameleon guessed: <strong>${esc(r.chameleonGuessWord)}</strong>` : ''}
         </span>
       </div>`;
@@ -419,9 +499,12 @@
 
     document.getElementById('votes-summary').innerHTML = publicSt.players.map(p => {
       const voted = r.votes?.[p.id];
+      const voteText = publicSt.settings.chaosMode && voted
+        ? `${voted.count} → ${(voted.suspects || []).map(nameOf).join(', ') || 'no suspects'}`
+        : (voted ? nameOf(voted) : '—');
       return `<div class="score-row">
         <span>${esc(p.name)}</span>
-        <span class="muted">→ ${voted ? esc(nameOf(voted)) : '—'}</span>
+        <span class="muted">→ ${esc(voteText)}</span>
       </div>`;
     }).join('');
 
