@@ -48,15 +48,20 @@ function checkRoundViability(gs) {
   if (!activePhases.includes(gs.phase)) return;
 
   const connectedPlayers = [...gs.players.values()].filter(p => p.connected);
-  const chameleon = gs.players.get(gs.chameleonId);
-  const chameleonGone = !chameleon || !chameleon.connected;
 
-  if (chameleonGone) {
-    // Show reveal screen so remaining players learn who the chameleon was
-    gs.forfeitRound();
-    io.to(gs.lobbyCode).emit('error:msg', 'The Chameleon fled! Round ended.');
-    broadcastLobby(gs);
-    return;
+  // Normal mode has exactly one chameleon. Chaos Mode may have zero imposters,
+  // so a null chameleonId is valid and must not end the round as a forfeit.
+  if (!gs.settings.chaosMode) {
+    const chameleon = gs.players.get(gs.chameleonId);
+    const chameleonGone = !chameleon || !chameleon.connected;
+
+    if (chameleonGone) {
+      // Show reveal screen so remaining players learn who the chameleon was
+      gs.forfeitRound();
+      io.to(gs.lobbyCode).emit('error:msg', 'The Chameleon fled! Round ended.');
+      broadcastLobby(gs);
+      return;
+    }
   }
 
   if (connectedPlayers.length < 3) {
@@ -136,7 +141,7 @@ io.on('connection', socket => {
   socket.on('settings:update', ({ lobbyCode, playerId, settings }) => {
     const gs = lobbyManager.getLobby(lobbyCode);
     if (!gs || gs.hostId !== playerId) return err(socket, 'Not authorised');
-    const allowed = ['spyMode','spyCount','hintingTimeout','chameleonGuessTimeout','packTiers'];
+    const allowed = ['spyMode','spyCount','hintingTimeout','chameleonGuessTimeout','packTiers','chaosMode'];
     for (const k of allowed) {
       if (settings[k] !== undefined) gs.settings[k] = settings[k];
     }
@@ -216,11 +221,49 @@ io.on('connection', socket => {
   socket.on('vote:cast', ({ lobbyCode, playerId, targetId }) => {
     const gs = lobbyManager.getLobby(lobbyCode);
     if (!gs) return;
-    gs.castVote(playerId, targetId);
+
+    // castVote validates both normal votes and Chaos Mode two-stage ballots.
+    // In Chaos Mode, targetId is { count, suspects }; in normal mode it is a playerId.
+    const ok = gs.castVote(playerId, targetId);
+    if (!ok) return err(socket, 'Invalid vote');
+
     io.to(lobbyCode).emit('vote:cast', { voterId: playerId });
+    broadcastLobby(gs);
 
     if (gs.allVotesCast()) {
       const result = gs.finalizeRound();
+
+      if (gs.settings.chaosMode) {
+        const caughtImposterId = gs.getChaosCaughtImposterId();
+
+        // Chaos Mode fix: if an actual imposter receives a majority of suspect
+        // selections, that imposter is caught and gets the same last-chance word
+        // guess as the normal Chameleon. If no imposter is majority-caught, reveal.
+        if (caughtImposterId) {
+          gs.caughtImposterId = caughtImposterId;
+          gs.chameleonId = caughtImposterId; // reuse the existing guess UI/socket flow
+          gs.phase = PHASES.VOTING;
+          gs.roundResult = null;
+
+          const imposter = gs.players.get(caughtImposterId);
+          if (imposter?.socketId) {
+            io.to(imposter.socketId).emit('chameleon:guess_prompt');
+          }
+
+          const guessTimeout = setTimeout(() => {
+            if (gs.phase !== PHASES.REVEAL) {
+              gs.finalizeRound();
+              broadcastLobby(gs);
+            }
+          }, gs.settings.chameleonGuessTimeout * 1000);
+          gs.registerTimeout(guessTimeout);
+          return;
+        }
+
+        broadcastLobby(gs);
+        return;
+      }
+
       if (result.chameleonCaught) {
         gs.phase = PHASES.VOTING;
         gs.roundResult = null;

@@ -17,6 +17,7 @@ const DEFAULT_SETTINGS = {
   hintingTimeout:       0,         // seconds (0 = disabled)
   chameleonGuessTimeout: 20,       // seconds
   packTiers:            ['normal'], // array: 'normal' | 'special' | 'xtra'
+  chaosMode:            false,      // hides the number of imposters and uses two-stage voting
 };
 
 class GameState {
@@ -34,14 +35,17 @@ class GameState {
 
   _resetRound() {
     this.chameleonId  = null;
+    this.imposterIds   = [];
+    this.actualImposterCount = 0;
     this.topic        = null;
     this.secretWord   = null;
     this.words        = [];          // canonical 16-word list
     this.playerGrids  = new Map();   // playerId → shuffled 16-word array
     this.hints        = new Map();   // playerId → { text, submitted }
-    this.votes        = new Map();   // voterId  → targetPlayerId
+    this.votes        = new Map();   // normal: voterId → targetPlayerId; chaos: voterId → { count, suspects }
     this.roundResult  = null;
     this.chameleonGuessWord = null;
+    this.caughtImposterId = null;    // Chaos Mode: imposter who earned a majority suspect vote and may guess the word
     this.submitOrder  = [];          // order in which players submitted hints (for spy targeting)
   }
 
@@ -118,15 +122,40 @@ class GameState {
     this.secretWord = secretWord;
     this.phase      = PHASES.DEALING;
 
-    // Pick chameleon randomly
     const ids = [...this.players.keys()];
-    this.chameleonId = ids[Math.floor(Math.random() * ids.length)];
+
+    if (this.settings.chaosMode) {
+      // Chaos Mode: choose a hidden random imposter count from 0..round(playerCount / 3).
+      // The count is stored only in server-side round state and is never included in publicState().
+      const maxImposters = this.maxChaosImposters();
+      this.actualImposterCount = Math.floor(Math.random() * (maxImposters + 1));
+      this.imposterIds = this._randomSample(ids, this.actualImposterCount);
+      this.chameleonId = this.imposterIds[0] || null; // kept for backward-compatible role checks
+    } else {
+      // Normal mode: keep the original single-chameleon behavior.
+      this.chameleonId = ids[Math.floor(Math.random() * ids.length)];
+      this.imposterIds = [this.chameleonId];
+      this.actualImposterCount = 1;
+    }
 
     // Give each player a shuffled grid
     for (const id of ids) {
       this.playerGrids.set(id, shuffleGridForPlayer(words));
       this.hints.set(id, { text: '', submitted: false });
     }
+  }
+
+  maxChaosImposters() {
+    return Math.round(this.players.size / 3);
+  }
+
+  _randomSample(ids, count) {
+    const shuffled = [...ids];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled.slice(0, count);
   }
 
   beginHinting() {
@@ -160,12 +189,12 @@ class GameState {
    * For the chameleon in 'live' or 'sealed' mode, only the first spyCount players are visible.
    */
   hintsVisibleTo(playerId) {
-    const isChameleon = playerId === this.chameleonId;
+    const isChameleon = this.imposterIds.includes(playerId);
     const result = {};
     
     // Determine which players have started typing (have non-empty text)
     const playersWithHints = [...this.hints.entries()]
-      .filter(([pid, h]) => pid !== this.chameleonId && h.text && h.text.trim().length > 0)
+      .filter(([pid, h]) => !this.imposterIds.includes(pid) && h.text && h.text.trim().length > 0)
       .map(([pid]) => pid);
     
     // For spy targeting: use submitOrder if available, otherwise fall back to playersWithHints
@@ -214,7 +243,26 @@ class GameState {
 
   castVote(voterId, targetId) {
     if (this.phase !== PHASES.VOTING) return false;
-    if (!this.players.has(targetId))  return false;
+
+    if (this.settings.chaosMode) {
+      // Chaos Mode stores a complete two-stage ballot in one synced vote payload.
+      // Shape: { count: number, suspects: string[] }. Suspect order does not matter for scoring.
+      const ballot = targetId || {};
+      const count = Number(ballot.count);
+      const suspects = Array.isArray(ballot.suspects) ? ballot.suspects : [];
+      const max = this.maxChaosImposters();
+      const uniqueSuspects = [...new Set(suspects)];
+
+      if (!Number.isInteger(count) || count < 0 || count > max) return false;
+      if (count === 0 && uniqueSuspects.length !== 0) return false;
+      if (count > 0 && uniqueSuspects.length !== count) return false;
+      if (uniqueSuspects.some(id => !this.players.has(id))) return false;
+
+      this.votes.set(voterId, { count, suspects: uniqueSuspects });
+      return true;
+    }
+
+    if (!this.players.has(targetId)) return false;
     this.votes.set(voterId, targetId);
     return true;
   }
@@ -227,13 +275,45 @@ class GameState {
     this.chameleonGuessWord = word;
   }
 
+  /**
+   * Chaos Mode helper: find whether any actual imposter received a majority of
+   * suspect selections. This keeps the normal “caught imposter guesses the word”
+   * flow while still supporting ballots that may contain multiple suspects.
+   */
+  getChaosCaughtImposterId() {
+    if (!this.settings.chaosMode || this.imposterIds.length === 0) return null;
+
+    const suspectCounts = new Map(this.imposterIds.map(id => [id, 0]));
+    for (const ballot of this.votes.values()) {
+      const suspects = Array.isArray(ballot?.suspects) ? new Set(ballot.suspects) : new Set();
+      for (const imposterId of this.imposterIds) {
+        if (suspects.has(imposterId)) {
+          suspectCounts.set(imposterId, (suspectCounts.get(imposterId) || 0) + 1);
+        }
+      }
+    }
+
+    const majorityThreshold = Math.floor(this.players.size / 2) + 1;
+    let caughtId = null;
+    let caughtVotes = 0;
+    for (const [imposterId, count] of suspectCounts.entries()) {
+      if (count >= majorityThreshold && count > caughtVotes) {
+        caughtId = imposterId;
+        caughtVotes = count;
+      }
+    }
+    return caughtId;
+  }
+
   finalizeRound() {
     const chameleonGuessed =
       this.chameleonGuessWord?.toLowerCase().trim() === this.secretWord.toLowerCase().trim();
 
     const votesObj = Object.fromEntries(this.votes);
-    const { deltas, outcome, chameleonCaught, votesAgainstChameleon } =
-      calculateScores(this.chameleonId, votesObj, chameleonGuessed, this.settings);
+    const { calculateChaosScores } = require('./Scoring');
+    const { deltas, outcome, chameleonCaught, votesAgainstChameleon, correctVoters } = this.settings.chaosMode
+      ? calculateChaosScores(this.imposterIds, votesObj, chameleonGuessed, this.settings)
+      : calculateScores(this.chameleonId, votesObj, chameleonGuessed, this.settings);
 
     // Apply deltas
     for (const [pid, pts] of Object.entries(deltas)) {
@@ -244,11 +324,15 @@ class GameState {
     this.roundResult = {
       outcome,
       chameleonId: this.chameleonId,
+      caughtImposterId: this.caughtImposterId,
+      imposterIds: this.settings.chaosMode ? this.imposterIds : [this.chameleonId],
+      actualImposterCount: this.settings.chaosMode ? this.actualImposterCount : 1,
       secretWord:  this.secretWord,
       chameleonGuessWord: this.chameleonGuessWord,
       chameleonGuessed,
       chameleonCaught,
       votesAgainstChameleon,
+      correctVoters,
       votes: votesObj,
       deltas,
       scores: Object.fromEntries([...this.players.entries()].map(([id, p]) => [id, p.score])),
@@ -272,7 +356,7 @@ class GameState {
       lobbyCode:  this.lobbyCode,
       phase:      this.phase,
       hostId:     this.hostId,
-      settings:   this.settings,
+      settings:   { ...this.settings, chaosMaxImposters: this.maxChaosImposters() },
       players:    this.getPlayerList(),
       topic:      this.topic,
       // words / secretWord are per-player (sent privately)
@@ -282,13 +366,14 @@ class GameState {
 
   /** Private data for one player */
   privateState(playerId) {
-    const isChameleon = playerId === this.chameleonId;
+    const isChameleon = this.imposterIds.includes(playerId);
     return {
       isChameleon,
       grid:       this.playerGrids.get(playerId) || null,
       secretWord: isChameleon ? null : this.secretWord,
       hints:      this.hintsVisibleTo(playerId),
       myVote:     this.votes.get(playerId) || null,
+      chaosMaxImposters: this.maxChaosImposters(),
     };
   }
 }
